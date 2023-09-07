@@ -1,0 +1,485 @@
+import copy
+import math
+import datetime
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as fn
+from torch.nn.init import normal_
+from numba import jit
+import heapq
+from module import *
+import random
+
+
+def trans_to_cuda(variable):
+    if torch.cuda.is_available():
+        return variable.cuda()
+    else:
+        return variable
+
+
+def trans_to_cpu(variable):
+    if torch.cuda.is_available():
+        return variable.cpu()
+    else:
+        return variable
+
+#
+# class MultiHeadAttention(nn.Module):
+#     """
+#     Multi-head Self-attention layers, a attention score dropout layer is introduced.
+#
+#     Args:
+#         input_tensor (torch.Tensor): the input of the multi-head self-attention layer
+#         attention_mask (torch.Tensor): the attention mask for input tensor
+#
+#     Returns:
+#         hidden_states (torch.Tensor): the output of the multi-head self-attention layer
+#
+#     """
+#
+#     def __init__(self, n_heads, hidden_size, hidden_dropout_prob, attn_dropout_prob, layer_norm_eps):
+#         super(MultiHeadAttention, self).__init__()
+#         if hidden_size % n_heads != 0:
+#             raise ValueError(
+#                 "The hidden size (%d) is not a multiple of the number of attention "
+#                 "heads (%d)" % (hidden_size, n_heads)
+#             )
+#
+#         self.num_attention_heads = n_heads
+#         self.attention_head_size = int(hidden_size / n_heads)
+#         self.all_head_size = self.num_attention_heads * self.attention_head_size
+#
+#         self.query = nn.Linear(hidden_size, self.all_head_size)
+#         self.key = nn.Linear(hidden_size, self.all_head_size)
+#         self.value = nn.Linear(hidden_size, self.all_head_size)
+#
+#         self.attn_dropout = nn.Dropout(attn_dropout_prob)
+#
+#         self.dense = nn.Linear(hidden_size, hidden_size)
+#         self.LayerNorm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+#         self.out_dropout = nn.Dropout(hidden_dropout_prob)
+#
+#     def transpose_for_scores(self, x):
+#         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+#         x = x.view(*new_x_shape)
+#         return x.permute(0, 2, 1, 3)
+#
+#     def forward(self, input_tensor, attention_mask):
+#         mixed_query_layer = self.query(input_tensor)
+#         mixed_key_layer = self.key(input_tensor)
+#         mixed_value_layer = self.value(input_tensor)
+#
+#         query_layer = self.transpose_for_scores(mixed_query_layer)
+#         key_layer = self.transpose_for_scores(mixed_key_layer)
+#         value_layer = self.transpose_for_scores(mixed_value_layer)
+#
+#         # Take the dot product between "query" and "key" to get the lastfm attention scores.
+#         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+#
+#         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+#         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+#         # [batch_size heads seq_len seq_len] scores
+#         # [batch_size 1 1 seq_len]
+#         attention_scores = attention_scores + attention_mask
+#
+#         # Normalize the attention scores to probabilities.
+#         attention_probs = nn.Softmax(dim=-1)(attention_scores)
+#         # This is actually dropping out entire tokens to attend to, which might
+#         # seem a bit unusual, but is taken from the original Transformer paper.
+#
+#         attention_probs = self.attn_dropout(attention_probs)
+#         context_layer = torch.matmul(attention_probs, value_layer)
+#         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+#         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+#         context_layer = context_layer.view(*new_context_layer_shape)
+#         hidden_states = self.dense(context_layer)
+#         hidden_states = self.out_dropout(hidden_states)
+#         hidden_states = self.LayerNorm(hidden_states + input_tensor)
+#
+#         return hidden_states
+#
+#
+# class FeedForward(nn.Module):
+#     """
+#     Point-wise feed-forward layer is implemented by two dense layers.
+#
+#     Args:
+#         input_tensor (torch.Tensor): the input of the point-wise feed-forward layer
+#
+#     Returns:
+#         hidden_states (torch.Tensor): the output of the point-wise feed-forward layer
+#
+#     """
+#
+#     def __init__(self, hidden_size, inner_size, hidden_dropout_prob, hidden_act, layer_norm_eps):
+#         super(FeedForward, self).__init__()
+#         self.dense_1 = nn.Linear(hidden_size, inner_size)
+#         self.intermediate_act_fn = self.get_hidden_act(hidden_act)
+#
+#         self.dense_2 = nn.Linear(inner_size, hidden_size)
+#         self.LayerNorm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+#         self.dropout = nn.Dropout(hidden_dropout_prob)
+#
+#     def get_hidden_act(self, act):
+#         ACT2FN = {
+#             "gelu": self.gelu,
+#             "relu": fn.relu,
+#             "swish": self.swish,
+#             "tanh": torch.tanh,
+#             "sigmoid": torch.sigmoid,
+#         }
+#         return ACT2FN[act]
+#
+#     def gelu(self, x):
+#         """Implementation of the gelu activation function.
+#
+#         For information: OpenAI GPT's gelu is slightly different (and gives slightly different results)::
+#
+#             0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+#
+#         Also see https://arxiv.org/abs/1606.08415
+#         """
+#         return x * 0.5 * (1.0 + torch.erf(x / math.sqrt(2.0)))
+#
+#     def swish(self, x):
+#         return x * torch.sigmoid(x)
+#
+#     def forward(self, input_tensor):
+#         hidden_states = self.dense_1(input_tensor)
+#         hidden_states = self.intermediate_act_fn(hidden_states)
+#
+#         hidden_states = self.dense_2(hidden_states)
+#         hidden_states = self.dropout(hidden_states)
+#         hidden_states = self.LayerNorm(hidden_states + input_tensor * 4)
+#
+#         return hidden_states
+#
+#
+# class TransformerLayer(nn.Module):
+#     """
+#     One transformer layer consists of a multi-head self-attention layer and a point-wise feed-forward layer.
+#
+#     Args:
+#         hidden_states (torch.Tensor): the input of the multi-head self-attention sublayer
+#         attention_mask (torch.Tensor): the attention mask for the multi-head self-attention sublayer
+#
+#     Returns:
+#         feedforward_output (torch.Tensor): The output of the point-wise feed-forward sublayer,
+#                                            is the output of the transformer layer.
+#
+#     """
+#
+#     def __init__(
+#         self, n_heads, hidden_size, intermediate_size, hidden_dropout_prob, attn_dropout_prob, hidden_act,
+#         layer_norm_eps
+#     ):
+#         super(TransformerLayer, self).__init__()
+#         self.multi_head_attention = MultiHeadAttention(
+#             n_heads, hidden_size, hidden_dropout_prob, attn_dropout_prob, layer_norm_eps
+#         )
+#         self.feed_forward = FeedForward(hidden_size, intermediate_size, hidden_dropout_prob, hidden_act, layer_norm_eps)
+#
+#     def forward(self, hidden_states, attention_mask):
+#         attention_output = self.multi_head_attention(hidden_states, attention_mask)
+#         feedforward_output = self.feed_forward(attention_output)
+#         return feedforward_output
+#
+#
+# class TransformerEncoder(nn.Module):
+#     r""" One TransformerEncoder consists of several TransformerLayers.
+#
+#         - n_layers(num): num of transformer layers in transformer encoder. Default: 2
+#         - n_heads(num): num of attention heads for multi-head attention layer. Default: 2
+#         - hidden_size(num): the input and output hidden size. Default: 64
+#         - inner_size(num): the dimensionality in feed-forward layer. Default: 256
+#         - hidden_dropout_prob(float): probability of an element to be zeroed. Default: 0.5
+#         - attn_dropout_prob(float): probability of an attention score to be zeroed. Default: 0.5
+#         - hidden_act(str): activation function in feed-forward layer. Default: 'gelu'
+#                       candidates: 'gelu', 'relu', 'swish', 'tanh', 'sigmoid'
+#         - layer_norm_eps(float): a value added to the denominator for numerical stability. Default: 1e-12
+#
+#     """
+#
+#     def __init__(
+#         self,
+#         n_layers=2,
+#         n_heads=2,
+#         hidden_size=64,
+#         inner_size=256,
+#         hidden_dropout_prob=0.5,
+#         attn_dropout_prob=0.5,
+#         hidden_act='gelu',
+#         layer_norm_eps=1e-12
+#     ):
+#
+#         super(TransformerEncoder, self).__init__()
+#         layer = TransformerLayer(
+#             n_heads, hidden_size, inner_size, hidden_dropout_prob, attn_dropout_prob, hidden_act, layer_norm_eps
+#         )
+#         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(n_layers)])
+#
+#     def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
+#         """
+#         Args:
+#             hidden_states (torch.Tensor): the input of the TransformerEncoder
+#             attention_mask (torch.Tensor): the attention mask for the input hidden_states
+#             output_all_encoded_layers (Bool): whether output all transformer layers' output
+#
+#         Returns:
+#             all_encoder_layers (list): if output_all_encoded_layers is True, return a list consists of all transformer
+#             layers' output, otherwise return a list only consists of the output of last transformer layer.
+#
+#         """
+#         all_encoder_layers = []
+#         for layer_module in self.layer:
+#             hidden_states = layer_module(hidden_states, attention_mask)
+#             if output_all_encoded_layers:
+#                 all_encoder_layers.append(hidden_states)
+#         if not output_all_encoded_layers:
+#             all_encoder_layers.append(hidden_states)
+#         return all_encoder_layers
+#
+
+class AbstractRecommender(nn.Module):
+    r"""Base class for all models
+    """
+
+    def __init__(self):
+        # self.logger = getLogger()
+        super(AbstractRecommender, self).__init__()
+
+    def calculate_loss(self, interaction):
+        r"""Calculate the training loss for a batch data.
+
+        Args:
+            interaction (Interaction): Interaction class of the batch.
+
+        Returns:
+            torch.Tensor: Training loss, shape: []
+        """
+        raise NotImplementedError
+
+    def predict(self, interaction):
+        r"""Predict the scores between users and items.
+
+        Args:
+            interaction (Interaction): Interaction class of the batch.
+
+        Returns:
+            torch.Tensor: Predicted scores for given users and items, shape: [batch_size]
+        """
+        raise NotImplementedError
+
+
+
+    def other_parameter(self):
+        if hasattr(self, 'other_parameter_name'):
+            return {key: getattr(self, key) for key in self.other_parameter_name}
+        return dict()
+
+    def load_other_parameter(self, para):
+        if para is None:
+            return
+        for key, value in para.items():
+            setattr(self, key, value)
+
+
+class SequentialRecommender(AbstractRecommender):
+    """
+    This is a abstract sequential recommender. All the sequential model should implement This class.
+    """
+    # type = ModelType.SEQUENTIAL
+
+    def __init__(self, config, dataset):
+        super(SequentialRecommender, self).__init__()
+
+    def gather_indexes(self, output, gather_index):
+        """Gathers the vectors at the specific positions over a minibatch"""
+        gather_index = gather_index.view(-1, 1, 1).expand(-1, -1, output.shape[-1])
+        output_tensor = output.gather(dim=1, index=gather_index)
+        return output_tensor.squeeze(1)
+
+class SASRec(SequentialRecommender):
+    r"""
+    SASRec is the first sequential recommender based on self-attentive mechanism.
+
+    NOTE:
+        In the author's implementation, the Point-Wise Feed-Forward Network (PFFN) is implemented
+        by CNN with 1x1 kernel. In this implementation, we follows the original BERT implementation
+        using Fully Connected Layer to implement the PFFN.
+    """
+
+    def __init__(self, n_node, config):
+        super(SASRec, self).__init__(n_node, config)
+
+        # load parameters info
+        self.n_items = n_node
+        self.hidden_size = config.hidden_units  # same as embedding_size
+        self.emb_size = config.hidden_units
+        self.inner_size = config.inner_units # the dimensionality in feed-forward layer
+        self.hidden_dim = config.hidden_dim
+        self.cluster_num = config.cluster_num
+        self.code_book_len = config.code_book_len
+
+        self.theta = nn.Linear(self.hidden_dim, (self.cluster_num * self.code_book_len) // 2, bias=True)
+        self.theta_p = nn.Linear((self.cluster_num * self.code_book_len) // 2, self.cluster_num * self.code_book_len,
+                                 bias=True)
+        self.mlp = nn.Linear((self.cluster_num * self.code_book_len), (self.cluster_num * self.code_book_len), bias=True)
+        self.A = nn.Linear(self.code_book_len * self.cluster_num, self.hidden_dim, bias=False)
+        self.batch_size = config.batch_size
+        self.loss_fct = nn.MSELoss(reduction='sum')
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=config.lr)
+        self.mse = nn.MSELoss()
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        """ Initialize the weights """
+        # if isinstance(module, (nn.Linear, nn.Embedding)):
+        #     # Slightly different from the TF version which uses truncated_normal for initialization
+        #     # cf https://github.com/pytorch/pytorch/pull/5617
+        #     module.weight.data.normal_(mean=0.0, std=self.initializer_range)
+        # elif isinstance(module, nn.LayerNorm):
+        #     module.bias.data.zero_()
+        #     module.weight.data.fill_(0.1)
+        # if isinstance(module, nn.Linear) and module.bias is not None:
+        #     module.bias.data.zero_()
+        # print(self.parameters())
+        # print(1)
+        for weight in self.parameters():
+            weight.data.uniform_(-0.1, 0.1)
+
+    def _sample_gumbel(self, batch_size, eps=1e-10):
+        u = torch.zeros(batch_size, self.code_book_len, self.cluster_num).uniform_().cuda()
+        return (-1 * torch.log(-1 * torch.log(u + eps) + eps)) / 10.0
+
+    def _gumbel_softmax(self, x, eps=1e-10, train=True):  # B x m x k -> B x m x k (one-hot), tau=1
+        x = torch.log(x + eps)
+        if train:
+            g = self._sample_gumbel(x.size(0))
+            x = x + Variable(g)
+        x = F.softmax(x / 0.3, dim=2)
+        return x
+
+    def forward(self, teacher):
+        teacher.eval()
+
+        h_w = torch.tanh(self.theta(teacher.embedding.weight))  # B x mk/2
+        a_w = F.softplus(self.theta_p(h_w))  # B x m*k
+        a_w = a_w.reshape(-1, self.code_book_len, self.cluster_num)  # B x m x k
+        self.a_w = F.softmax(a_w, dim=2)
+        y_w = self._gumbel_softmax(self.a_w, train=True)
+        self.embedding = self.A(y_w.reshape(-1, self.code_book_len * self.cluster_num))
+
+        mse_loss = self.loss_fct(self.embedding, teacher.embedding.weight).div(len(teacher.embedding.weight))
+        return mse_loss
+
+    def forward_test(self, item_seq, item_seq_len, mask, teacher):
+        teacher.eval()
+
+        y_w = self._gumbel_softmax(self.a_w, train=False)
+        self.embedding = self.A(y_w.reshape(-1, self.code_book_len * self.cluster_num))
+
+        position_ids = torch.arange(item_seq.size(1), dtype=torch.long, device=item_seq.device)
+        position_ids = position_ids.unsqueeze(0).expand_as(item_seq)
+        position_embedding = teacher.position_embedding(position_ids)
+
+        item_emb = self.embedding[item_seq]
+        # print(torch.equal(item_emb, seq_h))
+        item_emb = item_emb.reshape(self.batch_size, -1, self.emb_size)
+        input_emb = item_emb + position_embedding
+        input_emb = teacher.LayerNorm(input_emb)
+        input_emb = teacher.dropout(input_emb)
+        extended_attention_mask = teacher.get_attention_mask(item_seq)
+
+        trm_output = teacher.trm_encoder(input_emb, extended_attention_mask, output_all_encoded_layers=True)
+        output = trm_output[-1]
+        output = teacher.gather_indexes(output, item_seq_len - 1)
+        return output, self.embedding
+
+    def full_sort_predict(self, item_seq, seq_len, mask, teacher):
+        seq_output, item_emb = self.forward_test(item_seq, seq_len, mask, teacher)
+        scores = torch.matmul(seq_output, item_emb.transpose(0, 1))
+        return scores
+
+
+@jit(nopython=True)
+def find_k_largest(K, candidates):
+    n_candidates = []
+    for iid, score in enumerate(candidates[:K]):
+        n_candidates.append((score, iid))
+    heapq.heapify(n_candidates)
+    for iid, score in enumerate(candidates[K:]):
+        if score > n_candidates[0][0]:
+            heapq.heapreplace(n_candidates, (score, iid + K))
+    n_candidates.sort(key=lambda d: d[0], reverse=True)
+    ids = [item[1] for item in n_candidates]
+    # k_largest_scores = [item[0] for item in n_candidates]
+    return ids#, k_largest_scores
+
+#
+# def set_seed(args):
+#     random.seed(args.seed)
+#     np.random.seed(args.seed)
+#     torch.manual_seed(args.seed)
+#     torch.cuda.manual_seed_all(args.seed)
+#     torch.backends.cudnn.deterministic = True
+#     torch.backends.cudnn.benchmark = False
+
+
+def train_test(model, train_data, test_data, epoch, opt, teacher):
+
+    print('start training: ', datetime.datetime.now())
+    total_loss = 0.0
+    # set_seed(opt)
+    slices = train_data.generate_batch(opt.batch_size)
+
+    cnt = 0
+    for i in slices:
+        cnt += 1
+        # print(model.emb_model.decoder.A)
+        mse_loss = model(teacher)
+        loss = mse_loss
+        model.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.001)  # manage unstable training
+        if cnt % 100 == 0:
+            print(loss)
+        model.optimizer.step()
+        total_loss += loss.item()
+    print('\tLoss:\t%.3f' % total_loss)
+    top_K = [5, 10, 20]
+    metrics = {}
+    for K in top_K:
+        metrics['hit%d' % K] = []
+        metrics['mrr%d' % K] = []
+        metrics['nDCG%d' % K] = []
+    print('start predicting: ', datetime.datetime.now())
+
+    model.eval()
+    slices = test_data.generate_batch(opt.batch_size)
+    # print(model.embedding[:10], teacher.embedding.weight[:10])
+    for i in slices:
+        session_item, tar, seq_len, mask = test_data.get_slice(i)
+        session_item = trans_to_cuda(torch.Tensor(session_item).long())
+        seq_len = trans_to_cuda(torch.Tensor(seq_len).long())
+        mask = trans_to_cuda(torch.Tensor(mask).long())
+        score = model.full_sort_predict(session_item, seq_len, mask, teacher)
+        scores = trans_to_cpu(score).detach().numpy()
+        index = []
+        for idd in range(100):
+            index.append(find_k_largest(20, scores[idd]))
+        del score, scores
+        index = np.array(index)
+        for K in top_K:
+            for prediction, target in zip(index[:, :K], tar):
+                metrics['hit%d' % K].append(np.isin(target, prediction))
+                if len(np.where(prediction == target)[0]) == 0:
+                    metrics['mrr%d' % K].append(0)
+                    metrics['nDCG%d' % K].append(0)
+                else:
+                    metrics['mrr%d' % K].append(1 / (np.where(prediction == target)[0][0] + 1))
+                    metrics['nDCG%d' % K].append(np.log(2) * 1 / (np.log(np.where(prediction == target)[0][0] + 2)))
+    return metrics, total_loss
